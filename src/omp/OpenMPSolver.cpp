@@ -2,7 +2,7 @@
 // Created by Matthew Krueger on 10/13/25.
 //
 
-#include "SerialSolver.hpp"
+#include "OpenMPSolver.hpp"
 
 #include <algorithm>
 #include <ranges>
@@ -12,9 +12,10 @@
 
 #include "../shared/Utils.hpp"
 
+#include <omp.h>
 
 namespace kmeans {
-    SerialSolver::SerialSolver(Config &config) {
+    OpenMPSolver::OpenMPSolver(Config &config) {
         PROFILE_FUNCTION();
         m_DataSet = config.dataSet;
 
@@ -32,6 +33,7 @@ namespace kmeans {
         m_MaxIterations = config.maxIterations;
         m_ConvergenceThreshold = config.convergenceThreshold;
         m_CurrentCentroids = std::vector<Point>();
+        m_NumThreads = config.numThreads;
 
         size_t dimensionality = m_DataSet[0].numDimensions();
         size_t numCentroids = config.startingCentroidCount;
@@ -66,8 +68,11 @@ namespace kmeans {
     }
 
 
-    void SerialSolver::run() {
+    void OpenMPSolver::run() {
         PROFILE_FUNCTION();
+
+        // set up omp
+        omp_set_num_threads(m_NumThreads);
 
         // so the algorithm is roughly this
         // Calculates the *closest* centroid and class the point as this centroid
@@ -77,7 +82,7 @@ namespace kmeans {
         while (iteration < m_MaxIterations) {
             // test if we have reached convergence or max samples
             PROFILE_SCOPE("Iteration");
-            DEBUG_PRINT("SerialSolver iteration " << iteration << " of " << m_MaxIterations);
+            DEBUG_PRINT("OpenMPSolver iteration " << iteration << " of " << m_MaxIterations);
 
             // in each iteration, we have to class the centroid, then accumulate the centroid to the new average. Generally speaking,
             // while this class -> reduction operation is two separate operations, in this case it may be advantageous to interleave these operations
@@ -89,85 +94,65 @@ namespace kmeans {
             // since m_CurrentCentroids has counts, we can fill the vector with zero
             //m_CurrentCentroids = std::vector<Point>(m_PreviousCentroids.size(), Point(std::vector<double>(m_DataSet[0].numDimensions(), 0.0), 0));
 
-            // now that we have that, we can now accumulate
-            // again, this uses move semantics to pass the *same* value back and forth,
-            // so the accumulation is a zero cost abstraction that matches the reduction pattern more closely
-            // than "just" a for loop
-            m_CurrentCentroids = std::accumulate(
-                m_DataSet.begin(),
-                m_DataSet.end(),
-                std::vector<Point>(m_PreviousCentroids.size(),
-                                   Point(std::vector<double>(m_DataSet[0].numDimensions(), 0.0), 0)),
-                [&](std::vector<Point> acc, Point &point) {
-                    PROFILE_SCOPE("Accumulate");
-                    auto closestCentroidInPrevious = point.findClosestPointInVector(m_PreviousCentroids);
-
-                    if (closestCentroidInPrevious != m_PreviousCentroids.end()) {
-                        size_t centroidIndex = std::distance(m_PreviousCentroids.begin(), closestCentroidInPrevious);
-                        acc[centroidIndex] += point;
-                        acc[centroidIndex].setCount(acc[centroidIndex].getCount() + 1);
-                        return acc;
-                    } else {
-                        throw std::runtime_error("Centroid not found in previous centroids");
-                    }
-                }
+            // create a global accumulator
+            std::vector<Point> globalAccumulators(
+                m_PreviousCentroids.size(),
+                Point(std::vector<double>(m_DataSet[0].numDimensions(), 0.0), 0)
             );
 
-            // transform the m_CurrentCentroids by the scalar
-            // so that we have the actual average
+            // now that we have that, we can now accumulate
+            // since OMP does not support std::accumulate, and this pattern is a bit complicated, I am going to
+            // use critical in this case
+#pragma omp parallel
+            {
+
+                // set up the thread local accumulators
+                std::vector<Point> localAccumulators(
+                    m_PreviousCentroids.size(),
+                    Point(std::vector<double>(m_DataSet[0].numDimensions(), 0.0), 0)
+                );
+
+                // use nowait so threads can continue when they want
+#pragma omp for schedule(static) nowait
+                for (size_t m_DataSetPointIndex = 0; m_DataSetPointIndex < m_DataSet.size(); ++m_DataSetPointIndex) {
+                    if (auto it = m_DataSet[m_DataSetPointIndex].findClosestPointInVector(m_PreviousCentroids); it != m_PreviousCentroids.end()) {
+                        const size_t idx = std::distance(m_PreviousCentroids.begin(), it);
+
+                        // Accumulate into LOCAL vector. No locks needed.
+                        localAccumulators[idx] += m_DataSet[m_DataSetPointIndex];
+                        localAccumulators[idx].setCount(localAccumulators[idx].getCount() + 1);
+                    }
+                }
+
+                // lock the global accumulators
+                // and then allow each thread to do their thing
+                // in this case this particular antipattern is easier than using the custom reductor function
+#pragma omp critical
+                {
+                    for (size_t k = 0; k < globalAccumulators.size(); ++k) {
+                        globalAccumulators[k] += localAccumulators[k];
+                        globalAccumulators[k].setCount(globalAccumulators[k].getCount() + localAccumulators[k].getCount());
+                    }
+                }
+
+            } // end omp parallel
+
+            // move global accumulators to m_CurrentCentroids (we do not do this directly, so the accumulation can stay atomic just in case)
+            m_CurrentCentroids = std::move(globalAccumulators);
+
+            // normalize the centroid
             // note a prior bug would destroy an empty centroid which has now been corrected
-            size_t largestClusterIndex = 0;
-            size_t maxCount = 0;
+            std::ranges::for_each(m_CurrentCentroids, [this](Point &centroid) {
+                if (centroid.getCount() > 0) {
+                    centroid /= static_cast<double>(centroid.getCount());
+                } else {
+                    // Identify which centroid has no count (pointer arithmetic)
+                    size_t idx = &centroid - &m_CurrentCentroids[0];
 
-            for (size_t clusterIndex = 0; clusterIndex < m_CurrentCentroids.size(); ++clusterIndex) {
-                if (m_CurrentCentroids[clusterIndex].getCount() > 0) {
-                    // Normalize: divide vector sum by count
-                    m_CurrentCentroids[clusterIndex] /= static_cast<double>(m_CurrentCentroids[clusterIndex].getCount());
-
-                    // Track the cluster with the most points
-                    if (m_CurrentCentroids[clusterIndex].getCount() > maxCount) {
-                        maxCount = m_CurrentCentroids[clusterIndex].getCount();
-                        largestClusterIndex = clusterIndex;
-                    }
+                    // stay where we were
+                    centroid = m_PreviousCentroids[idx];
                 }
-            }
-
-            // Pass 2: Teleport "Zombie" (empty) centroids to split the largest cluster
-            for (size_t currentCentroidIndex = 0; currentCentroidIndex < m_CurrentCentroids.size(); ++currentCentroidIndex) {
-                if (m_CurrentCentroids[currentCentroidIndex].getCount() == 0) {
-
-                    // We found a zombie. We will overwrite it with the largest cluster's centroid
-                    // effectively "splitting" the largest cluster into two.
-
-                    // Guard: If all centroids are 0 (start of run or catastrophic failure), do nothing.
-                    if (maxCount == 0) continue;
-
-                    Point& source = m_CurrentCentroids[largestClusterIndex];
-                    Point& zombie = m_CurrentCentroids[currentCentroidIndex];
-
-                    // Copy the position of the largest cluster
-                    zombie = source;
-
-                    // IMPORTANT: We must "Jitter" (offset) them slightly.
-                    // If they are identical, they will fight for the exact same points.
-                    // By pushing them slightly apart, the K-Means logic will naturally
-                    // divide the large cluster between them in the next iteration.
-
-                    const double epsilon = 0.01; // Small offset constant
-
-                    // Modify the first dimension slightly.
-                    // (You could modify all dimensions, but one is usually sufficient to break symmetry)
-                    if (zombie.numDimensions() > 0) {
-                        // Push Zombie +epsilon
-                        zombie.getData()[0] += epsilon;
-
-                        // Push Source -epsilon
-                        source.getData()[0] -= epsilon;
-                    }
-
-                    DEBUG_PRINT("Detected Zombie Centroid [" << i << "]. Teleported to split Cluster [" << largestClusterIndex << "]");
-                }
-            }
+            });
 
             // now we can check if the centroids have stabilized. If they have, we'll break
             if (areCentroidsConverged(m_PreviousCentroids, m_CurrentCentroids, m_ConvergenceThreshold)) {

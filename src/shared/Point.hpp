@@ -14,6 +14,7 @@
 namespace kmeans{
     class Point{
     public:
+
         /**
          * @brief A structure to hold flattened point data for efficient serialization/deserialization.
          *
@@ -33,6 +34,11 @@ namespace kmeans{
 
         Point() = default;
 
+        /**
+         *
+         * @param data Data to store
+         * @param count Internal variable. DO not touch except to store hidden data
+         */
         explicit Point(std::vector<double> data, size_t count = 1) noexcept: m_Data(std::move(data)), m_Count(count) {}
 
         /**
@@ -53,8 +59,8 @@ namespace kmeans{
          * @return A reference to the assigned Point object.
          */
         Point& operator=(Point other){
-            using std::swap;
-            swap(*this, other);
+            std::swap(m_Data, other.m_Data);
+            std::swap(m_Count, other.m_Count);
             return *this;
         }
 
@@ -159,7 +165,7 @@ namespace kmeans{
         void serialize(Archive &ar, const unsigned int version) {
             ar & m_Data;
             ar & m_Count;
-        }
+        };
 
     private:
         std::vector<double> m_Data;

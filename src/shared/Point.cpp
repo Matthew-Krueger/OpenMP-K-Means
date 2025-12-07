@@ -26,7 +26,8 @@ namespace kmeans {
 
         // Lambda function to calculate the squared difference between two doubles.
         auto squaredifference = [](double first, double second) -> double {
-            return std::pow(first - second, 2);
+            double fms = first - second;
+            return fms * fms;
         };
 
         // Calculate the sum of squared differences using std::transform_reduce.

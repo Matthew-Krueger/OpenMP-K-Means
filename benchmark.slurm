@@ -26,7 +26,7 @@ EXECUTABLE="$SLURM_SUBMIT_DIR/build/kmeans_mpi"
 srun --ntasks=1 "${EXECUTABLE}" --print-header
 
 # Run benchmarks for thread counts 1-10
-for num_threads in 1 2 3 4 5 6 7 8 9 10; do
-    echo "Running with ${num_threads} threads..."
-    srun --ntasks=${num_threads} --nodes=1 --ntasks-per-node=${num_threads} "${EXECUTABLE}" --max-iterations 100000 --num-samples 1000000 --dimensions 25 --clusters 50 --spread 3.5 --trials 10
+for num_omp_threads in 1 2 3 4 5 6 7 8 9 10; do
+    echo "Running with ${num_omp_threads} threads..."
+    srun --ntasks=1 --nodes=1 --ntasks-per-node=1 "${EXECUTABLE}" --max-iterations 100000 --num-samples 1000000 --dimensions 25 --clusters 50 --spread 3.5 --trials 10 --num_threads ${num_omp_threads}
 done

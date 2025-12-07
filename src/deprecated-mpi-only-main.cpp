@@ -1,7 +1,7 @@
 #include <boost/mpi.hpp>
 
 #include "mpi/MPISolver.hpp"
-#include "serial/SerialSolver.hpp"
+#include "serial/OpenMPSolver.hpp"
 #include "shared/DataSet.hpp"
 #include "shared/Logging.hpp"
 #include "shared/Point.hpp"
@@ -11,6 +11,14 @@
 #include "shared/Timer.hpp"
 #include "shared/DualOutputStream.hpp"
 #include "shared/Utils.hpp"
+
+void serial_profiler() {
+
+}
+
+void mpi_profiler() {
+
+}
 
 int main(int argc, char **argv) {
     DEBUG_PRINT("Creating MPI Environment");
@@ -139,7 +147,7 @@ int main(int argc, char **argv) {
             // runs serial algorithm
             // for the serial algorithm, we'll create a serial solver and go.
             // we don't actually want to time anything other than run, so we'll set it all up first
-            kmeans::SerialSolver::Config config(
+            kmeans::OpenMPSolver::Config config(
                 maxIterations,
                 convergenceThreshold,
                 kmeans::DataSet(dataSet.getPoints()),
@@ -148,7 +156,7 @@ int main(int argc, char **argv) {
             );
 
             // create the solver
-            kmeans::SerialSolver solver(config);
+            kmeans::OpenMPSolver solver(config);
 
             // and solve
             auto time = timer::time([&solver] {
