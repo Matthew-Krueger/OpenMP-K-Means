@@ -5,7 +5,7 @@
 #SBATCH --time=3:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --account=PCS0294
-#SBATCH --job-name=KMeansMPI
+#SBATCH --job-name=KMeansOpenMP
 
 # Load modules
 module load openmpi/5.0.2
@@ -20,7 +20,7 @@ cd build || exit
 cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_CXX_COMPILER=g++ -G "Unix Makefiles" ..
 make
 
-EXECUTABLE="$SLURM_SUBMIT_DIR/build/kmeans_mpi"
+EXECUTABLE="$SLURM_SUBMIT_DIR/build/kmeans_openmp"
 
 # Print header to CSV
 srun --ntasks=1 "${EXECUTABLE}" --print-header
