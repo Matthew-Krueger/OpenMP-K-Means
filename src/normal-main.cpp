@@ -14,9 +14,6 @@
 #include "shared/Utils.hpp"
 #include "shared/Timer.hpp"
 
-#undef DEBUG_FLAG
-#define DEBUG_FLAG true
-
 int main(int argc, char **argv) {
     size_t maxIterations;
     double convergenceThreshold;
