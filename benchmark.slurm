@@ -30,5 +30,5 @@ srun --ntasks=1 "${EXECUTABLE}" --print-header
 for num_omp_threads in 1 2 3 4 5 6 7 8 9 10; do
     echo "Running with ${num_omp_threads} threads..."
     export OMP_NUM_THREADS=${num_omp_threads}
-    srun --ntasks=1 "${EXECUTABLE}" --max-iterations 100000 --num-samples 1000000 --dimensions 25 --clusters 50 --spread 3.5 --trials 10 --num_threads ${num_omp_threads}
+    srun --ntasks=1 "${EXECUTABLE}" --max-iterations 100000 --num-samples 1000000 --dimensions 25 --clusters 50 --spread 3.5 --trials 10 --num-threads ${num_omp_threads}
 done
