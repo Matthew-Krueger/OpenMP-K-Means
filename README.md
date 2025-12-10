@@ -7,8 +7,6 @@ date: 2025-12-05
 categories:
 - Portfolio
 - OpenMP
-- MPI
-- Boost
 - Clustering
 - K-Means
 - Parallel Computing
@@ -19,7 +17,8 @@ weight: 1       # You can add weight to some posts to override the default sorti
 The repository for this project can be found [here](https://github.com/Matthew-Krueger/OpenMP-K-Means).
 
 ## 1. Summary
-This report describes the implementation and parallelization of K-Means Clustering using OpenMP, vs. serial execution.
+This report describes the implementation and parallelization of K-Means Clustering using OpenMP,
+in comparison to serial execution.
 This is comparing and contrasting focusing on OpenMP, and building on the prior work done in MPI.
 You can read the prior report at [this link](https://www.matthewkrueger.com/blog/20251023-kmeans-mpi).
 Only relevant changes over MPI are described here, except for basic overview.
@@ -40,132 +39,89 @@ demarcated by a specified tolerance (epsilon).
 ## 2. Explanation of Design
 
 ### 2.1. Algorithm Choice and Serial Implementation
-
-K-Means clustering (Lloyd's algorithm) was chosen for this assignment due to its popularity in big data analytics,
-as well as its simplicity and ease of implementation.
-K-Means can be written trivially in both serial and parallel forms, both of which were implemented for comparison.
-Both the serial and parallel implementations are written in C++23 (preview) and validated to work with GCC 13.2.0.
-However, you may have better luck on a more modern version of the compiler with full support for C++23.
-
-C++23 was chosen for this assignment as it provides a variety of useful features that work together to save memory
-and make the code read more functionally.
-Tab-Autocomplete was used extensively throughout this assignment for help with functional design.
-The list of features used includes (but is not limited to):
-*   `std::optional`
-*   `std::variant`
-*   `std::accumulate`
-*   `std::ranges::accumulate`
-*   `std::ranges::for_each`
-*   `std::ranges::transform`
-*   `std::ranges::view::iota`
-*   `std::ranges::view::transform`
-
-Specifically, these features were chosen due to their utility in regard to delayed explanation and optimization
-for inline computation and auto vectorization.
-Due to the way in which these functional features are implemented,
-they rely on values being move constructable and largely contiguous in memory.
-This allows for the compiler to perform optimizations that are otherwise impossible.
-It also allows for Link Time Optimization (LTO) to optimize further in the final binary.
-In doing this, the program execution time can be reduced significantly by using the full power of the CPU.
-On my M1 Pro Mac, this uses NEON instructions, and on the OSC cluster, it uses AVX512 instructions.
-
-Importantly, these optimizations (generally) require the value to be move-constructable.
-This uses the Named Return Value Optimization (NRVO) as well as Return Value Optimization (RVO)
-to avoid unnecessary copies of the data.
-By default, the compiler will copy the data if it is not move-constructable,
-which often leads to unnecessary copies and heap allocations.
-In effect and from my research, the move semantics effectively tell the compiler "hey, if you're using this constructor,
-we basically don't care about the old one."
-In the end, it can be optimized away.
-It is then a hint (or more accurately an instruction) to the compiler to *not* copy the data.
-I relied on explicit copies of inner data, though with more care it may be possible to optimize the semantics
-within the constraints of C++ to avoid unnecessary copies, while retaining semantic ease of use.
-
-NOTE: These claims are based on C++23 features as stated, and have not been validated against earlier versions of C++.
-
-Boost was chosen for this project for its ease of use and integration with both CMake and MPI.
-Boost.MPI was used for the parallel implementation, and Boost.Serialization was used to provide serialization
-so that the data could be sent between processes.
-
-I also implemented a profiler in Raw MPI. I had much of this code already written, but I had to re-implement it
-for this project. I used the `MPI_Wtime` function to measure the time taken to run the program.
-
-I also wrote a custom timer class.
-Within an MPI context with the flag "BUILD WITH MPI" set, this timer class will use `MPI_Wtime` to measure the time.
-Otherwise, it will use `std::chrono` to measure the time.
-This was used to compare the performance of the serial and parallel implementations.
-Timer uses proper SFINAE (Substitution Failure Is Not An Error) to determine how to run.
-This timer is defined as such (shortened for brevity):
-```c++
-template<typename T>
-TimeResult {
-    T functionResult;
-    uint64_t timeMicroseconds;
-    inline uint64_t getTimeMilliseconds() const { return timeMicroseconds/1000UL; }
-    inline uint64_t getTimeSeconds() const { return timeMicroseconds/1000000UL; }
-    inline double getTimeSecondsDouble() const { return timeMicroseconds/static_cast<double>(1e6); }
-};
-
-template<typename FuncToTime>
-std::enable_if_t<!std::is_void_v<std::invoke_result_t<FuncToTime>>, TimeResult<std::invoke_result_t<FuncToTime>>>
-        time(FuncToTime toTime);
-        
-template<typename FuncToTime>
-std::enable_if_t<std::is_void_v<std::invoke_result_t<FuncToTime>>, TimeResult<void>>
-        time(FuncToTime toTime);
-```
-
-This lets you call the timer with any function you want to time, and it will return the result of the function
-along with the time taken to run the function.
-For instance:
-```c++
-auto timeResult = time([&]{
-    // do something that takes a long time
-});
-std::cout << "Time taken: " << timeResult.getTimeSecondsDouble() << " seconds" << std::endl;
-```
-If your function returns a value, it will automatically be placed in `TimeResult<T>::functionResult`.
-If your function returns void, functionResult will not be present.
-
-Other important design considerations include:
-*   The `Point` class was designed to be move-constructable, and the `DataSet` class was designed to be move-constructable.
-*   Copy constructors are disabled on most classes, requiring instead explicit copies of their data members.
-*   Logging was done via a macro `DEBUG_LOG()` so it could be largely disabled.
-*   For necessary logs, logging was done via if constexpr statements.
-*   Many functions use views and then materialize them. This allows for memory savings as the values are not computed
-    until materialization, leading to less memory usage overall, especially important for dataset generation or other
-    data pipeline operations.
+See the MPI report for the baseline serial design, which remains unaltered here.
+(Note hungarian algorithm was added, which will be referenced later. It does not impact timing and thus is not included here)
 
 ### 2.2. Parallelization Strategy
 
-The operation was parallelized using MPI and Boost.MPI.
-For data decomposition, I chose to use a simple data decomposition strategy where each process owns a subset of the data.
-For example, if there are 10 processes, each process will own 1/10th of the data.
-I did properly handle the case where the number of processes was not a multiple of the number of data points.
-In this case, the remainder is distributed to processes 0 through r, where r is the remainder.
-The data is distributed using a scatterv operation.
-Upon each iteration, each process calculates the accumulator of each subset of the data.
-Then, the local accumulator is Allreduce'd to a globally agreed upon accumulator using `boost::mpi::all_reduce`.
-Each rank also Allreduce's the count of the centroids (though in this case count is a "hidden" attribute within
-the `Point` class, allowing one all reduce operations with a single custom reduction functor to handle both cases).
-From there, each rank divides each centroid by the count to get the new centroid.
-This division is not done collectively as division is not associative, or commutative.
-From there the process repeats.
+The algorithm was parallelized via OpenMP.
+Specifically, only one part of the serial algorithm was changed.
+First, because OpenMP does not natively support transform operations from the standard library such as `std::transform`,
+I instead opted to use a regular for loop to iterate over the points in the dataset.
+The local data was handled very similarly to MPI, for this reason alone: in my testing, a custom reduction function
+did not really work as intended and caused a variety of issues despite officially being supported.
+Instead, I created a global accumulator and a local accumulator for each thread.
+The local accumulators are used to accumulate the sum of each thread's individual work unit,
+and then each thread writes its local accumulator to the global accumulator.
+
+This follows this order:
+```c++
+            // create a global accumulator
+            std::vector<Point> globalAccumulators(
+                m_PreviousCentroids.size(),
+                Point(std::vector<double>(m_DataSet[0].numDimensions(), 0.0), 0)
+            );
+
+            // now that we have that, we can now accumulate
+            // since OMP does not support std::accumulate in the manner needed here, and this pattern is a bit complicated, I am going to
+            // use critical in this case
+#pragma omp parallel
+            {
+
+                // set up the thread local accumulators
+                std::vector<Point> localAccumulators(
+                    m_PreviousCentroids.size(),
+                    Point(std::vector<double>(m_DataSet[0].numDimensions(), 0.0), 0)
+                );
+
+                // use nowait so threads can continue when they want
+#pragma omp for schedule(static) nowait
+                for (size_t m_DataSetPointIndex = 0; m_DataSetPointIndex < m_DataSet.size(); ++m_DataSetPointIndex) {
+                    if (auto it = m_DataSet[m_DataSetPointIndex].findClosestPointInVector(m_PreviousCentroids); it != m_PreviousCentroids.end()) {
+                        const size_t idx = std::distance(m_PreviousCentroids.begin(), it);
+
+                        // Accumulate into LOCAL vector. No locks needed.
+                        localAccumulators[idx] += m_DataSet[m_DataSetPointIndex];
+                        localAccumulators[idx].setCount(localAccumulators[idx].getCount() + 1);
+                    }
+                }
+
+                // lock the global accumulators
+                // and then allow each thread to do their thing
+                // in this case this particular antipattern is easier than using the custom reductor function
+#pragma omp critical
+                {
+                    for (size_t k = 0; k < globalAccumulators.size(); ++k) {
+                        globalAccumulators[k] += localAccumulators[k];
+                        globalAccumulators[k].setCount(globalAccumulators[k].getCount() + localAccumulators[k].getCount());
+                    }
+                }
+
+            } // end omp parallel
+```
+
+The only other change from MPI is that I had to rewrite the main function to remove the MPI calls.
+In here, I set the `omp_set_num_threads` to the number of threads passed by the command line switch.
+
+The first pragma is *specifically* to do the parallel accumulation.
+Nowait was chosen so the threads can continue opportunistically and enter the critical at any time,
+rather than synchronizing and then entering one at a time.
+Due to the omp critical after, there will be no race conditions other than as described in Section 2.3,
+which reduces overhead and barrier costs.
 
 ### 2.3 Considerations for Parallelization
 
-I attempted to discriminate based on what was "worth it" and what was not to parallelize.
-In a large dataset with a high K (number of clusters), the cost of division is likely to be much higher
-and may benefit from problem partitioning. However, this would substantially increase the amount of
-communication and setup time for the allreduce operations and may not be worth it for K below a few thousand.
+(largely unchanged from MPI)
 
-In lower dimensional spaces with many hundreds or thousands of K, it may be worth setting up a K-D search space
-that is able to prune the search space significantly.
-However, in higher dimensional spaces, this may not be worth it, and without many hundreds of thousands of K,
-the cost of setting up that data structure may not be worth it either.
+One additional consideration is that since we are still using double (IEEE 754) precision floating point numbers,
+due to the non-deterministic order of thread completion compared to MPI which uses deterministic ordering for Allreduce,
+we may lose some precision in this reduction and have some small variance.
+Largely this is due to IEEE 754's non-associativity of addition, and thus the order of operations.
+It does not affect us in MPI as the order of operations is deterministic leading to the same error over time.
 
-I chose not to implement a K-D search space as it would be a significant amount of work and would not be worth the
-benefit.
+There is still a possibility of contention over the global accumulator, especially with larger K values.
+However, in this test I only used a K of 50, and the operation is fundamentally O(n) making parallelization largely
+not worthwhile in this context.
 
 ---
 
@@ -173,20 +129,25 @@ benefit.
 
 ### 3.1. Experiment Setup
 
+(largely unchanged from MPI, repeated for clarity)
 I ran my experiment on the OSC (Ohio Supercomputing Center) Cardinal Cluster.
 Details of the hardware can be found [on their website](https://www.osc.edu/resources/technical_support/supercomputers/cardinal).
-I did not request any specific hardware, only 10 processes distributed in whatever way the scheduler chose.
+I did not request any specific hardware, only 10 threads on one node. I did not specify NUMA domains.
 I used `openmpi/5.0.2`, `boost/1.83.0`, `cmake/3.25.2`, and `gcc/13.2.0`.
 It should be noted that `gcc/13.2.0` only supports the preview version of C++23, and no other compiler supported
 specific features I used, specifically zip views.
+OpenMPI is not linked unless specified. It was not specified for any test runs, but the option remains in the code.
 
 I ran each test a total of 10 times and reported the runtime of each run.
-`srun` was invoked once per number of processes, and the number of processes was specified as a command line argument.
+`srun` was invoked once per number of processes,
+and the number of threads was specified as a command line argument and the `OMP_NUM_THREADS` environment variable.
 The script used to run the experiments is available in the root directory of this repository, called `benchmark.slurm`.
 
 I regenerated the dataset from the same seed for each invocation of srun, but I did not regenerate the dataset for each
 set of batches. This did not affect my result as I only timed the actual run of the K-Means algorithm, NOT of dataset
 generation.
+(it is worthwhile to mention that due to HBMe memory and other factors on cardinal,
+there may be some slight memory training that occurs as more runs are performed, but the impact is likely negligible)
 
 Each dataset was generated using the following parameters:
 *   Number of samples: 1,000,000
@@ -197,11 +158,12 @@ Each dataset was generated using the following parameters:
 *   Max iterations: 100,000
 *   Default convergence threshold: 0.0001
 
-Because of my timer, it detected it was running in an MPI context through CMake, and it used `MPI_Wtime` to measure
-the time.
+Because of my timer, it used std::chrono::high_resolution_clock to measure the time elapsed.
 10 Trials were executed for each configuration (process count).
 
-All statistical analysis was done on Apple Numbers, and is included in the `/Results` directory.
+All statistical analysis was done on Apple Numbers, and is included in the `/Results/omp` directory.
+MPI Results are included in the `/Results/mpi` directory for reference, though for any corrections or clarifications,
+please refer to the MPI writeup referenced at the top of this document.
 
 ### 3.2. Benchmark Results
 
@@ -209,66 +171,119 @@ The results of the run are as follows:
 
 #### 3.2.1. Results for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
 
-| Number Processes | Number Samples (Average) | Number Dimensions (Average) | Number Clusters (Average) | Spread (Average) | Seed (Average) | Run Time (s) (Average) | Run Time (s) (STDEV) | Iteration Count (Average) | Speedup | Efficiency | Karp-Flatt |
-|:-----------------|:-------------------------|:----------------------------|:--------------------------|:-----------------|:---------------|:-----------------------|:---------------------|:--------------------------|:--------|:-----------|:-----------|
-| 1                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 147.6953               | 1.16058501052989     | 250                       | 1.000   | 100.000%   |            |
-| 2                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 75.18676               | 0.228644552866574    | 250                       | 1.964   | 98.219%    | 0.018      |
-| 3                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 50.24906               | 0.23718394268303     | 250                       | 2.939   | 97.975%    | 0.010      |
-| 4                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 37.81581               | 0.121233635321776    | 250                       | 3.906   | 97.641%    | 0.008      |
-| 5                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 30.18961               | 0.11871861643773     | 250                       | 4.892   | 97.845%    | 0.006      |
-| 6                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 25.20847               | 0.0628473291220699   | 250                       | 5.859   | 97.649%    | 0.005      |
-| 7                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 21.6393                | 0.040914762345366    | 250                       | 6.825   | 97.505%    | 0.004      |
-| 8                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 18.98175               | 0.0363672089785412   | 250                       | 7.781   | 97.261%    | 0.004      |
-| 9                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 16.8384                | 0.0497478307734786   | 250                       | 8.771   | 97.459%    | 0.003      |
-| 10               | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 15.1942                | 0.0357178589006178   | 250                       | 9.720   | 97.205%    | 0.003      |
-
+OpenMP Results:
+##### Table of Values for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
+| Number Threads | Number Samples (Average) | Number Dimensions (Average) | Number Clusters (Average) | Spread (Average) | Seed (Average) | Wall Time (s) (Average) | Wall Time (s) (STDEV) | Iteration Count (Average) |
+|----------------|--------------------------|-----------------------------|---------------------------|------------------|----------------|-------------------------|-----------------------|---------------------------|
+| 1              | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 148.4354                | 1.003                 | 250                       | 1.000 | 100.000% | |
+| 2              | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 74.4632                 | 0.368                 | 250                       | 1.993 | 99.670% | 0.003 |
+| 3              | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 49.47206                | 0.137                 | 250                       | 3.000 | 100.013% | -0.000 |
+| 4              | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 37.31448                | 0.055                 | 250                       | 3.978 | 99.449% | 0.002 |
+| 5              | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 29.83018                | 0.088                 | 250                       | 4.976 | 99.520% | 0.001 |
+| 6              | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 24.83431                | 0.057                 | 250                       | 5.977 | 99.617% | 0.001 |
+| 7              | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 21.3100                 | 0.053                 | 250                       | 6.966 | 99.507% | 0.001 |
+| 8              | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 18.7791                 | 0.065                 | 250                       | 7.904 | 98.803% | 0.002 |
+| 9              | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 16.59767                | 0.083                 | 250                       | 8.943 | 99.368% | 0.001 |
+| 10             | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 14.9674                 | 0.067                 | 250                       | 9.917 | 99.173% | 0.001 |
 
 #### Speedup for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
-![Speedup Plot](/20251023-mpi-k-means/Speedup.png)
+![Speedup Plot](/Results/openmp/Speedup.png)
 
 #### Efficiency for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
-![Efficiency Plot](/20251023-mpi-k-means/Efficiency.png)
+![Efficiency Plot](/Results/openmp/Efficiency.png)
 
 #### Karp-Flatt for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
-![Karp-Flatt Plot](/20251023-mpi-k-means/Karp-Flatt.png)
+![Karp-Flatt Plot](/Results/openmp/Karp-Flatt.png)
 
 #### Run Time (Seconds) for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
-![Run Time Plot](/20251023-mpi-k-means/Runtime-seconds.png)
+![Run Time Plot](/Results/openmp/Runtime-seconds.png)
 
 #### Run Time (Seconds, STDEV) for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
-![Run Time Plot](/20251023-mpi-k-means/Runtime-seconds-sigma.png)
+![Run Time Plot](/Results/openmp/Runtime-seconds-sigma.png)
 
 ### 3.3. Interpretation of Results
 
-The speedup is very near linear, showing excellent parallelization.
-The efficiency plot is very near to 100%, showing excellent scalability.
-The Karp-Flatt metric is very close to 0, showing excellent parallel performance.
-The runtime plot follows a tight power-law scaling relation, further illustrating the excellent scalability.
-In other words, according to the graph, the runtime scales inversely to the number of processes.
-As k doubles, the runtime roughly halves, consistent with inverse linear scaling.
+#### 3.3.1. Standalone Interpretation
+My interpretations of the results are largely the same as they were under MPI.
 
-Interestingly to me, the Karp-Flatt metric is actually approaching zero (and thus is showing a decrease in the
-inherently sequential portion of the algorithm).
-While I do not have an exact answer to this, I would suspect this is due to a very heavy GPU job running on the
-cluster at the same time.
-It was using over 600GB/s of bandwidth on infiniband, with all but 4 GPUs at 100% utilization.
-This could cause some cache locality issues with fewer processes
-(taking longer to loop and thus invalidating the cache).
-It could have also been due to the HBM memory cache being able to keep my data entirely local in the cache as per-rank
-dataset size decreased, decreasing latency for arithmetic options.
-In other words, there was a heavy job going on in the cluster, and it may have affected it, or at least the cache
-locality of the data, especially for larger datasets.
+The speedup is very near linear, and the efficiency is very close to linear.
+At the problem size chosen, the implementation displays near optimal scaling.
 
-My data shows no real sign of a scaling limit approaching at this point in time as p increases.
-However, as I mentioned, there may be some skew in this data due to the heavy job running on the cluster.
-I had no other choice in cluster due to the availability of `gcc/13.2.0`.
+The data shows no real sign of a scaling limit approaching at this point in time as p increases,
+but there are some inherent scaling limits that could show, especially at higher K.
 
-In theory, there should have been no communication bottlenecks or load imbalance as the data is distributed evenly
-across the processes, beside the aforementioned heavy job running on the cluster.
+#### 3.3.2. Interpretation in Context with MPI
+The MPI results are very similar to the OpenMP results.
 
-The design, which minimized MPI communication except for one synchronized all_reduce, effectively reduced the amount of
-work that any given rank needed to perform, and made the only real serial time the time spent waiting for synchronization
-of the all_reduce.
+For ease of comparison, here are the results of the MPI implementation (GitHub link at the top of this document):
+
+##### Table of Values for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
+| Number Processes | Number Samples (Average) | Number Dimensions (Average) | Number Clusters (Average) | Spread (Average) | Seed (Average) | Wall Time (s) (Average) | Wall Time (s) (STDEV) | Iteration Count (Average) |
+|------------------|--------------------------|-----------------------------|---------------------------|------------------|----------------|-------------------------|-----------------------|---------------------------|
+| 1                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 147.6953                | 1.16059               | 250                       |
+| 2                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 75.18676                | 0.22864               | 250                       |
+| 3                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 50.24906                | 0.23718               | 250                       |
+| 4                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 37.81581                | 0.12123               | 250                       |
+| 5                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 30.18961                | 0.11872               | 250                       |
+| 6                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 25.20847                | 0.06285               | 250                       |
+| 7                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 21.6393                 | 0.04091               | 250                       |
+| 8                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 18.98175                | 0.03637               | 250                       |
+| 9                | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 16.8384                 | 0.04975               | 250                       |
+| 10               | 1000000                  | 25                          | 50                        | 3.5              | 1234           | 15.1942                 | 0.03572               | 250                       |
+
+
+##### Speedup for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
+![Speedup Plot](/Results/mpi/Speedup.png)
+
+##### Efficiency for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
+![Efficiency Plot](/Results/mpi/Efficiency.png)
+
+##### Karp-Flatt for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
+![Karp-Flatt Plot](/Results/mpi/Karp-Flatt.png)
+
+##### Run Time (Seconds) for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
+![Run Time Plot](/Results/mpi/Runtime-seconds.png)
+
+##### Run Time (Seconds, STDEV) for 1,000,000 Samples, 25 Dimensions, 50 Clusters, Process Count 1-10
+![Run Time Plot](/Results/mpi/Runtime-seconds-sigma.png)
+
+The MPI results are very similar to the OpenMP results.
+However, there are four notable differences:
+1. The MPI implementation is slower than the OpenMP implementation.
+2. The MPI implementation is less efficient than the OpenMP implementation.
+3. The MPI implementation has a higher karp-flatt coefficient than the OpenMP implementation.
+4. The OpenMP implementation has a higher karp-flatt coefficient "jitter." (that is, the karp flatt is less consistent when adding more threads)
+
+In large part these are almost certainly due to MPI communication overhead.
+Assuming the MPI implementation was run on only one node,
+the extra overhead would primarily come to serialization and deserialization of data.
+Put together, the differences are mostly negligible.
+However, in a larger setup running thousands of times to find the optimal solution,
+not just a solution, the differences could become more pronounced.
+At 250 iterations across all runs, that is 250 specific time-sensitive serializations/deserialization in each AllReduce.
+OpenMP, being a single process, largely avoids this memory, compute, and network traffic overhead.
+OpenMP's implementation does face another problem, however,
+which is the aforementioned associativity of IEEE 754 doubles.
+There also may be some additional jitter if the scheduler put the job between NUMA domains since it was not specified
+in the slurm script.
+However, the data does not really reflect any scaling problems commonly associated with NUMA communication,
+and can be called essentially "good enough."
+
+Both implementations also received a statistically significant R^2 value of 1 when describing the best fit line
+of their wall times.
+This shows that their performance is consistent.
+
+However, the OpenMP implementation did have a standard deviation value around double that of the MPI implementation.
+I did not check system utilization at the time, however, this system is very heavily used by GPU jobs and is normally
+under quite immense memory pressure because of those jobs.
+If there was any significant process thrashing, it could cause variability in the results from run to run or from day to day.
+In addition, since we did run on the backfill queue, there is a possibility that the specific system cores allocated
+may not have been 100% stable either, which could also cause variability.
+Lastly, it could also just be variable due to shared memory access patterns,
+leading to potentially different memory access patterns between the two implementations.
+This could also be particularly notable due to the presence of HBMe memory on these machines.
+*Especially* on the backfill queue, and especially with each thread having access to (even if it is not reading) the
+whole dataset at once.
 
 ---
 
@@ -276,89 +291,96 @@ of the all_reduce.
 
 ### 4.1. Correctness Strategy
 
-Unfortunately, I did not have time to add an automated verification strategy to this assignment.
-I did compare the verification by hand, and the list of centroids was identical (minus floating point differences)
-on my local machine for all values of `p` I tested.
+I added an implementation of the Hungarian Algorithm to address label switching and to give a squared distance metric.
+This gives the "energy state of the system" which we can use to imperially verify the correctness of the algorithm.
 
-For early termination, I used the Euclidean distance the current iteration of centroids and the previous iteration of
-centroids.
-If the distance was less than the convergence threshold, I terminated early.
-This does not need to be a fancy algorithm as label switching should only happen on initial centroid selection.
-If there are unclear labels or any sort of label switching earlier on in execution,
-the whole point is that it is not converged at that time and should continue anyway.
+When running the algorithm on a reduced subset of the dataset, I noticed that I was in a very high energy state.
+The algorithm was converging, but several centroids were converging to the same location rather than moving
+towards each group.
+Upon closer inspection of the MPI algorithm and comparison with the serial implementation,
+I noticed this issue was present in all versions.
+This is not *necessarily* an issue, however, it is an indication that the algorithm is converging to a local minimum,
+not the intended global minimum.
+I did not attempt to fix this issue at this time as the main goal was to get a specific solve of the algorithm working.
+The energy state of each solve was not recorded in the runs.
 
-## 4.2 Future Verification Strategy and Methods
+I also validated the algorithm was correctly implemented by running it locally on my laptop where I have more control.
+I ran each test once with 10,000 samples, 3 dimensions, 10 clusters, and a spread of 3.5.
+The results were as follows:
+```terminaloutput
+mckrueg@MacBookPro cmake-build-debug % ./kmeans_openmp --max-iterations 100000 --num-samples 10000 --dimensions 3 --clusters 10 --spread 3.5 --trials 1 --num-threads 1 
+Known Good Centroids:
+        Point: (22668,47979.2,66262.2)
+        Point: (38115.9,36405.6,58620.5)
+        Point: (48770.2,33666.7,-29679)
+        Point: (43568.5,50359.4,-59226.1)
+        Point: (26191.8,25562.7,-9607.56)
+        Point: (8152.51,27913.7,-47470)
+        Point: (54788.4,36943.7,-68192.5)
+        Point: (47713.3,50874.8,68768.3)
+        Point: (320.971,22865.4,-36587.4)
+        Point: (51269.9,41025.3,-44354.5)
+Hungarian Time: 9e-06
+Total Squared Euclidian Distance: 3.08616e+10
+1,10000,3,10,3.5,1234,0.006491,yes,14,0
+Calculated Centroids:
+        Point: (8152.39,27913.8,-47470)with a count of 1000
+        Point: (49599.3,40498.8,-50363)with a count of 4000
+        Point: (22670.4,47981.7,66260.1)with a count of 245
+        Point: (22668,47981,66265.8)with a count of 281
+        Point: (47713.4,50874.8,68768.1)with a count of 1000
+        Point: (38116,36405.6,58620.6)with a count of 1000
+        Point: (22663.8,47979.4,66260.7)with a count of 234
+        Point: (22669.4,47975.7,66262)with a count of 240
+        Point: (26191.8,25562.7,-9607.51)with a count of 1000
+        Point: (320.922,22865.3,-36587.4)with a count of 1000
+mckrueg@MacBookPro cmake-build-debug % ./kmeans_openmp --max-iterations 100000 --num-samples 10000 --dimensions 3 --clusters 10 --spread 3.5 --trials 1 --num-threads 10
+Known Good Centroids:
+        Point: (22668,47979.2,66262.2)
+        Point: (38115.9,36405.6,58620.5)
+        Point: (48770.2,33666.7,-29679)
+        Point: (43568.5,50359.4,-59226.1)
+        Point: (26191.8,25562.7,-9607.56)
+        Point: (8152.51,27913.7,-47470)
+        Point: (54788.4,36943.7,-68192.5)
+        Point: (47713.3,50874.8,68768.3)
+        Point: (320.971,22865.4,-36587.4)
+        Point: (51269.9,41025.3,-44354.5)
+Hungarian Time: 1.8e-05
+Total Squared Euclidian Distance: 3.08616e+10
+10,10000,3,10,3.5,1234,0.007402,yes,14,0
+Calculated Centroids:
+        Point: (8152.39,27913.8,-47470)with a count of 1000
+        Point: (49599.3,40498.8,-50363)with a count of 4000
+        Point: (22670.4,47981.7,66260.1)with a count of 245
+        Point: (22668,47981,66265.8)with a count of 281
+        Point: (47713.4,50874.8,68768.1)with a count of 1000
+        Point: (38116,36405.6,58620.6)with a count of 1000
+        Point: (22663.8,47979.4,66260.7)with a count of 234
+        Point: (22669.4,47975.7,66262)with a count of 240
+        Point: (26191.8,25562.7,-9607.51)with a count of 1000
+        Point: (320.922,22865.3,-36587.4)with a count of 1000
+mckrueg@MacBookPro cmake-build-debug % 
+```
 
-For the future, I would like to add automated verification.
-My ideal verification would be to run the Hungarian algorithm on the centroids and compare the results.
-Since I have "ground truth" data for the center of the clusters (but not necessarily their centroids themselves),
-I need to correct any label switching that occurs.
-Then, we can take the maximum Euclidean distance between the two sets of (now paired) centroids, who had their global
-cost minimized through the Hungarian algorithm.
-This becomes a driver for a similarity score, allowing us to compare the results of the parallel and sequential
-implementations. If the maximum distance of the paired points is very different (when run on an **IDENTICAL**) dataset,
-then we know that the parallel and sequential implementations are not equivalent.
-Through my manual testing I do know that they are equivalent, but I would like to automate this verification as well.
-
-When I performed my manual checks on a smaller dataset, I received the same sets of centroids.
-Running the serial `p=1` vs parallel `p=10` on my local machine with reduced parameter count:
-`--max-iterations 100000 --num-samples 100000 --dimensions 3 --clusters 10 --spread 3.5 --trials 1`
-yielded these results for `p=1` and `p=10` with the DEBUG_FLAG overridden in main.cpp:
-
+The serial algorithm's converged outputs are essentially identical to the parallel algorithm's converged outputs.
+There may be some difference not shown in the default output due to the IEEE 754 double being not associative as well.
 NOTE: I ran in 10 core mode to match OSC. Due to P-Core eviction on my MacBook, the speedup is not stable above seven cores.
 
-```terminaloutput
-mckrueg@Matthews-MacBook-Pro cmake-build-debug % mpiexec -n 1 ./kmeans_mpi --max-iterations 100000 --num-samples 100000 --dimensions 3 --clusters 10 --spread 3.5 --trials 1
+## 4.2 Future Optimization, Verification Strategy, and Methods
 
-Known Good Centroids:
-        Point: (22668,47979.2,66262.2)
-        Point: (38115.9,36405.6,58620.5)
-        Point: (48770.2,33666.7,-29679)
-        Point: (43568.5,50359.4,-59226.1)
-        Point: (26191.8,25562.7,-9607.56)
-        Point: (8152.51,27913.7,-47470)
-        Point: (54788.4,36943.7,-68192.5)
-        Point: (47713.3,50874.8,68768.3)
-        Point: (320.971,22865.4,-36587.4)
-        Point: (51269.9,41025.3,-44354.5)
-1,100000,3,10,3.5,1234,0.442583,yes,116,0
-Calculated Centroids:
-        Point: (4236.73,25389.6,-42028.7)
-        Point: (48770.3,33666.8,-29679.1)
-        Point: (42914.6,43640.2,63694.4)
-        Point: (54786.1,36944.9,-68193.8)
-        Point: (51270,41025.3,-44354.5)
-        Point: (22666.1,47978.2,66260.4)
-        Point: (26191.7,25562.7,-9607.53)
-        Point: (22669.8,47980.3,66264)
-        Point: (43568.5,50359.4,-59226.1)
-        Point: (54790.6,36942.6,-68191.3)
-mckrueg@Matthews-MacBook-Pro cmake-build-debug % mpiexec -n 10 ./kmeans_mpi --max-iterations 100000 --num-samples 100000 --dimensions 3 --clusters 10 --spread 3.5 --trials 1
+For future development,
+an important enhancement would be to incorporate the ability to execute multiple k-means trials concurrently.
+Each trial could leverage different initial centroids or random seeds,
+allowing for a comprehensive exploration of the solution space.
+This approach would facilitate identifying the optimal configuration by comparing the results across various runs,
+ultimately aiming to minimize the total energy state of the system (e.g., within-cluster sum of squares).
 
-Known Good Centroids:
-        Point: (22668,47979.2,66262.2)
-        Point: (38115.9,36405.6,58620.5)
-        Point: (48770.2,33666.7,-29679)
-        Point: (43568.5,50359.4,-59226.1)
-        Point: (26191.8,25562.7,-9607.56)
-        Point: (8152.51,27913.7,-47470)
-        Point: (54788.4,36943.7,-68192.5)
-        Point: (47713.3,50874.8,68768.3)
-        Point: (320.971,22865.4,-36587.4)
-        Point: (51269.9,41025.3,-44354.5)
-10,100000,3,10,3.5,1234,0.159717,yes,116,0
-Calculated Centroids:
-        Point: (4236.73,25389.6,-42028.7)
-        Point: (48770.3,33666.8,-29679.1)
-        Point: (42914.6,43640.2,63694.4)
-        Point: (54786.1,36944.9,-68193.8)
-        Point: (51270,41025.3,-44354.5)
-        Point: (22666.1,47978.2,66260.4)
-        Point: (26191.7,25562.7,-9607.53)
-        Point: (22669.8,47980.3,66264)
-        Point: (43568.5,50359.4,-59226.1)
-        Point: (54790.6,36942.6,-68191.3)
-```
+While the initial focus of this project was primarily on implementing the core solver algorithm,
+this extended capability was deferred.
+However, it represents a strong candidate for demonstrating effective parallelization,
+as independent trials can be run in parallel,
+significantly reducing the overall computation time required to achieve a more robust and optimal clustering solution.
 
 ---
 
@@ -394,7 +416,16 @@ bit better.
 
 ### 5.2. Trade-offs
 
-I did not really have any *specific* trade-offs to make.
+I had to decide not to use a custom reduction functor due to complexity and performance concerns.
+It also did not seem to reliably work with my implementation of the Point class, since fundamentally a vector of points
+is really just a vector of a vector of doubles.
+In effect, `std::vector<Point>` is really just a wrapper over `std::vector<std::vector<double>>`.
+This makes custom reduction functors difficult to implement.
+While a custom reduction functor remains the best choice,
+in the case of high values of `k`,
+a multiphasic reduction may be preferable if a custom reduction functor cannot be used or produces unreliable results.
+
+This is in addition to the trade-offs mentioned in the MPI build:
 The closest thing was that I had to use the pipeline system to generate the dataset, as not doing so was unsustainable
 on my machine due to limited memory.
 While this would have been fine on OSC, I really wanted this program to be runnable on my local machine for
@@ -402,6 +433,7 @@ ease of development.
 
 ### 5.3. Advice for Future Students
 
+My advice remains unchanged from the previous assignment.
 I would advise making heavy use of timers and profiling to be able to understand the detailed implications of your code.
 I would also heavily advise the heavy use of modern C++ functions, as well as auto vectorization optimizations
 to speed up computations to the maximum extent possible.
@@ -415,5 +447,10 @@ to speed up computations to the maximum extent possible.
 *   [X] SLURM scripts for OSC
 *   [X] Benchmark data (CSV in `/Results` directory)
 *   [X] `README.md` (This report, following the specified sections)
+
+### 6.1 AI Use
+No significant AI use beyond tab autocomplete and generation of the hungarian algorithm code (which is not required for the project).
+There were several discussions over a custom reduction functor, but I eventually scrapped that idea entirely to reduce the surface area of the shared memory contention.
+As such, no transcripts are included in this submission.
 
 ---
