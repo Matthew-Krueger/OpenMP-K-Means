@@ -15,6 +15,7 @@ weight: 1       # You can add weight to some posts to override the default sorti
 
 ## 0. GitHub Repository
 The repository for this project can be found [here](https://github.com/Matthew-Krueger/OpenMP-K-Means).
+All OpenMP specific code is under the `src/omp` directory.
 
 ## 1. Summary
 This report describes the implementation and parallelization of K-Means Clustering using OpenMP,
