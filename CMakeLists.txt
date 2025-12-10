@@ -54,7 +54,7 @@ endif()
 
 # For GCC or Clang: -O3 enables auto-vectorization (implies -ftree-vectorize),
 # -march=native uses all available CPU extensions (e.g., AVX, SSE) on the build machine.
-#add_compile_options(-O3 -march=native -ftree-vectorize -flto -funroll-loops -std=c++23)
+add_compile_options(-O3 -march=native -ftree-vectorize -flto -funroll-loops -std=c++23)
 add_compile_options(-Wunknown-pragmas)
 
 
